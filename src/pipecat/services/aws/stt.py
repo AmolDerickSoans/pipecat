@@ -266,6 +266,7 @@ class AWSTranscribeSTTService(STTService):
             Language.JA: "ja-JP",
             Language.KO: "ko-KR",
             Language.ZH: "zh-CN",
+            Language.PL: "pl-PL",
         }
         return language_map.get(language)
 
@@ -284,6 +285,9 @@ class AWSTranscribeSTTService(STTService):
 
             try:
                 response = await self._ws_client.recv()
+
+                self.start_watchdog()
+
                 headers, payload = decode_event(response)
 
                 if headers.get(":message-type") == "event":
@@ -305,6 +309,7 @@ class AWSTranscribeSTTService(STTService):
                                             "",
                                             time_now_iso8601(),
                                             self._settings["language"],
+                                            result=result,
                                         )
                                     )
                                     await self._handle_transcription(
@@ -320,6 +325,7 @@ class AWSTranscribeSTTService(STTService):
                                             "",
                                             time_now_iso8601(),
                                             self._settings["language"],
+                                            result=result,
                                         )
                                     )
                 elif headers.get(":message-type") == "exception":
@@ -339,3 +345,5 @@ class AWSTranscribeSTTService(STTService):
             except Exception as e:
                 logger.error(f"{self} Unexpected error in receive loop: {e}")
                 break
+            finally:
+                self.reset_watchdog()

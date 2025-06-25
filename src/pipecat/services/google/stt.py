@@ -747,6 +747,14 @@ class GoogleSTTService(STTService):
         try:
             while True:
                 try:
+                    self.start_watchdog()
+
+                    if self._request_queue.empty():
+                        # wait for 10ms in case we don't have audio
+                        await asyncio.sleep(0.01)
+                        self.reset_watchdog()
+                        continue
+
                     # Start bi-directional streaming
                     streaming_recognize = await self._client.streaming_recognize(
                         requests=self._request_generator()
@@ -755,12 +763,13 @@ class GoogleSTTService(STTService):
                     # Process responses
                     await self._process_responses(streaming_recognize)
 
+                    self.reset_watchdog()
+
                     # If we're here, check if we need to reconnect
                     if (int(time.time() * 1000) - self._stream_start_time) > self.STREAMING_LIMIT:
                         logger.debug("Reconnecting stream after timeout")
                         # Reset stream start time
                         self._stream_start_time = int(time.time() * 1000)
-                        continue
                     else:
                         # Normal stream end
                         break
@@ -770,7 +779,8 @@ class GoogleSTTService(STTService):
 
                     await asyncio.sleep(1)  # Brief delay before reconnecting
                     self._stream_start_time = int(time.time() * 1000)
-                    continue
+                finally:
+                    self.reset_watchdog()
 
         except Exception as e:
             logger.error(f"Error in streaming task: {e}")
@@ -795,12 +805,16 @@ class GoogleSTTService(STTService):
         """Process streaming recognition responses."""
         try:
             async for response in streaming_recognize:
+                self.start_watchdog()
+
                 # Check streaming limit
                 if (int(time.time() * 1000) - self._stream_start_time) > self.STREAMING_LIMIT:
                     logger.debug("Stream timeout reached in response processing")
+                    self.reset_watchdog()
                     break
 
                 if not response.results:
+                    self.reset_watchdog()
                     continue
 
                 for result in response.results:
@@ -816,7 +830,13 @@ class GoogleSTTService(STTService):
                     if result.is_final:
                         self._last_transcript_was_final = True
                         await self.push_frame(
-                            TranscriptionFrame(transcript, "", time_now_iso8601(), primary_language)
+                            TranscriptionFrame(
+                                transcript,
+                                "",
+                                time_now_iso8601(),
+                                primary_language,
+                                result=result,
+                            )
                         )
                         await self.stop_processing_metrics()
                         await self._handle_transcription(
@@ -829,12 +849,18 @@ class GoogleSTTService(STTService):
                         await self.stop_ttfb_metrics()
                         await self.push_frame(
                             InterimTranscriptionFrame(
-                                transcript, "", time_now_iso8601(), primary_language
+                                transcript,
+                                "",
+                                time_now_iso8601(),
+                                primary_language,
+                                result=result,
                             )
                         )
 
+                self.reset_watchdog()
         except Exception as e:
             logger.error(f"Error processing Google STT responses: {e}")
-
-            # Re-raise the exception to let it propagate (e.g. in the case of a timeout, propagate to _stream_audio to reconnect)
+            self.reset_watchdog()
+            # Re-raise the exception to let it propagate (e.g. in the case of a
+            # timeout, propagate to _stream_audio to reconnect)
             raise
